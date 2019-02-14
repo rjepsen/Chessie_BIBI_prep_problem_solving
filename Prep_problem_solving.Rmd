@@ -4,17 +4,84 @@ output: html_document
 ---
 
 ```{r}
-
+library(tidyverse)
+library(stringr)
+library(devtools)
+library(bibi2.0) 
+library(magrittr)
+library(ggplot2)
 ```
-
-
-
+Import the CSV containing the taxa information. Then, string trim and set all text to lowercase. Next, create a unique_id field, which is a concatenation of event_id and sample_number.
 ```{r}
+prep.df <- read.csv("ChessieBIBI_biology.csv")
 
+prep.df <- prep.df %>%
+  clean_data_frame() %>%
+  mutate_all(. , .funs=tolower) %>%
+  mutate(tsn_final = str_replace_all(tsn_final, "(?<![0-9])0+", "")) %>%
+  unite(unique_id, event_id, sample_number, remove = FALSE)
 ```
+Taxa roll-ups and exclusions. Also removing unique_ids with counts of < 70. Then, convert the Functional Feeding Group (FFG) and Habit codes to full names. This adds two new columns, *ffg* and *habit*, to **prep.df**, which will be used instead of *bibi_ffg* and *bibi_habit* in later scripts.
+```{r}
+prep.df <- prep.df %>%
+  prep_taxa() %>%
+  mutate(reporting_value = as.numeric(reporting_value)) %>%
+  filter(sum(reporting_value) > 70)
 
-
-```{r }
-
+prep.df <- prep.df %>%
+  mutate(ffg = case_when(
+    is.na(bibi_ffg) | bibi_ffg == "" ~ as.character(NA),
+    bibi_ffg == "cg" ~ "gather",
+    bibi_ffg == "pr" ~ "predator",
+    bibi_ffg == "sc" ~ "scrape",
+    bibi_ffg == "cf" ~ "filter",
+    bibi_ffg == "sh" ~ "shred",
+    bibi_ffg == "om" ~ "omnivore",
+    bibi_ffg == "pa" ~ "parasite",
+    bibi_ffg %in% c("pc", "pi") ~ "pierce",
+    TRUE ~ "ERROR"),
+  habit = case_when(
+    is.na(bibi_habit) | bibi_habit == "" ~ as.character(NA),
+    bibi_habit == "sp" ~ "sprawl",
+    bibi_habit == "cn" ~ "cling",
+    bibi_habit == "cb" ~ "climb",
+    bibi_habit == "bu" ~ "burrow",
+    bibi_habit == "sw" ~ "swim",
+    bibi_habit == "sk" ~ "skate",
+    TRUE ~ "ERROR"))
 ```
+Perform general cleaning of the data frame, and use `select` to retain only the indicated columns. The resulting data frame is **taxa.df**, which will be the input to the rarefaction step.
+```{r}
+fill_taxa <- function(long.df, final.id.col, ...) {
+  rank.quos <- rlang::quos(...)
+  final.id.col <- rlang::enquo(final.id.col)
 
+  rank.vec <- long.df %>%
+    select(!!!rank.quos) %>%
+    names()
+
+  final.df <- long.df %>%
+    tidyr::gather(rank, taxon, !!!rank.quos) %>%
+    dplyr::mutate(rank = factor(rank, levels = rank.vec),
+                  taxon = if_else(taxon == "", as.character(NA), taxon)) %>%
+    dplyr::group_by(!!final.id.col) %>%
+    tidyr::fill(taxon)  %>%
+    dplyr::ungroup() %>%
+    tidyr::spread(rank, taxon)
+
+  return(final.df)
+  }
+
+taxa.df <- prep.df %>% 
+  ungroup() %>% 
+  select(unique_id, icprb_bioregion_id, station_id, sample_date, reporting_value, final_id, phylum, subphylum, class, subclass, 
+         order, suborder, family, subfamily, tribe, genus, habit, ffg, bibi_tv, aspt) %>%   
+  group_by_at(vars(-reporting_value)) %>%
+  summarize(reporting_value = sum(reporting_value)) %>%
+  ungroup() %>%
+  fill_taxa(. , final_id, phylum:genus) %>%
+  mutate(final_id = genus) %>% 
+  group_by_at(vars(-reporting_value)) %>%
+  summarize(reporting_value = sum(reporting_value)) %>%
+  ungroup()
+```
